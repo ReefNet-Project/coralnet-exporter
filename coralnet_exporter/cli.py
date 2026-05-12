@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -123,6 +124,32 @@ def _source_output_dir(output_dir: Path, source_name: str) -> Path:
 
 def _has_existing_files(paths: list[Path]) -> bool:
     return all(path.exists() and path.stat().st_size > 0 for path in paths)
+
+
+def _selected_type_paths(text: str, all_path: Path, confirmed_path: Path) -> list[Path]:
+    paths: list[Path] = []
+    for item in (part.strip().lower() for part in text.split(",")):
+        if item == "all" and all_path not in paths:
+            paths.append(all_path)
+        elif item in {"on_confirmed", "confirmed"} and confirmed_path not in paths:
+            paths.append(confirmed_path)
+    return paths
+
+
+def _state_has_done_source(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return any(entry.get("status") == "done" for entry in state.get("sources", {}).values())
+
+
+def _count_files(path: Path) -> int:
+    if not path.exists() or not path.is_dir():
+        return 0
+    return sum(1 for child in path.iterdir() if child.is_file())
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -263,43 +290,64 @@ def download_cmd(
             console.print(f"[green]Saved classifier info[/green] [dim]{classifier_paths[0]}[/dim]")
 
     if "labelset" in selected:
-        console.print("[bold]Exporting labelset[/bold]")
-        run_legacy_module(
-            "crawl_labelset",
-            [
-                "--input-csv", str(input_csv),
-                "--output-dir", str(output_dir),
-                "--state-file", str(work_dir / "labelset_state.json"),
-                "--summary-file", str(work_dir / "labelset_summary.json"),
-                "--failures-file", str(work_dir / "labelset_failures.csv"),
-                "--log-file", str(work_dir / "labelset.log"),
-                *resume_flag, *force_flag,
-            ],
-            console=console,
-            env_updates=auth_env,
-        )
+        labelset_path = source_dir / "labelset.csv"
+        if resume and not force and _has_existing_files([labelset_path]):
+            console.print(f"[green]Skipping labelset[/green] [dim](existing: {labelset_path})[/dim]")
+        else:
+            console.print("[bold]Exporting labelset[/bold]")
+            run_legacy_module(
+                "crawl_labelset",
+                [
+                    "--input-csv", str(input_csv),
+                    "--output-dir", str(output_dir),
+                    "--state-file", str(work_dir / "labelset_state.json"),
+                    "--summary-file", str(work_dir / "labelset_summary.json"),
+                    "--failures-file", str(work_dir / "labelset_failures.csv"),
+                    "--log-file", str(work_dir / "labelset.log"),
+                    *resume_flag, *force_flag,
+                ],
+                console=console,
+                env_updates=auth_env,
+            )
 
     if "metadata" in selected:
-        console.print("[bold]Exporting metadata[/bold]")
-        run_legacy_module(
-            "scrape_metadata",
-            [
-                "--input-csv", str(input_csv),
-                "--output-dir", str(output_dir),
-                "--metadata-types", metadata_types,
-                "--state-file", str(work_dir / "metadata_state.json"),
-                "--summary-file", str(work_dir / "metadata_summary.json"),
-                "--failures-file", str(work_dir / "metadata_failures.csv"),
-                "--log-file", str(work_dir / "metadata.log"),
-                "--export-timeout", str(export_timeout),
-                *resume_flag, *force_flag,
-            ],
-            console=console,
-            env_updates=auth_env,
+        metadata_paths = _selected_type_paths(
+            metadata_types,
+            source_dir / "metadata_all.csv",
+            source_dir / "metadata_confirmed.csv",
         )
+        if resume and not force and metadata_paths and _has_existing_files(metadata_paths):
+            console.print(f"[green]Skipping metadata[/green] [dim](existing: {', '.join(str(path) for path in metadata_paths)})[/dim]")
+        else:
+            console.print("[bold]Exporting metadata[/bold]")
+            run_legacy_module(
+                "scrape_metadata",
+                [
+                    "--input-csv", str(input_csv),
+                    "--output-dir", str(output_dir),
+                    "--metadata-types", metadata_types,
+                    "--state-file", str(work_dir / "metadata_state.json"),
+                    "--summary-file", str(work_dir / "metadata_summary.json"),
+                    "--failures-file", str(work_dir / "metadata_failures.csv"),
+                    "--log-file", str(work_dir / "metadata.log"),
+                    "--export-timeout", str(export_timeout),
+                    *resume_flag, *force_flag,
+                ],
+                console=console,
+                env_updates=auth_env,
+            )
 
     if "images" in selected:
-        if source_info.first_image_number is None:
+        image_dir = source_dir / "images"
+        images_state = work_dir / "images_state.json"
+        expected_images = source_info.total_images
+        local_images = _count_files(image_dir)
+        images_done = _state_has_done_source(images_state) or (
+            expected_images is not None and local_images >= expected_images
+        )
+        if resume and not force and images_done and local_images > 0:
+            console.print(f"[green]Skipping images[/green] [dim](existing: {local_images} files in {image_dir})[/dim]")
+        elif source_info.first_image_number is None:
             console.print("[yellow]Skipping images: could not discover FirstImageNumber from browse/images page.[/yellow]")
         else:
             console.print("[bold]Downloading images[/bold]")
@@ -320,31 +368,39 @@ def download_cmd(
             )
 
     if "annotations" in selected:
-        console.print("[bold]Exporting annotations[/bold]")
-        annotation_args = [
-            "--input-csv", str(input_csv),
-            "--output-dir", str(output_dir),
-            "--annotation-types", annotation_types,
-            "--state-file", str(work_dir / "annotations_state.json"),
-            "--summary-file", str(work_dir / "annotations_summary.json"),
-            "--failures-file", str(work_dir / "annotations_failures.csv"),
-            "--log-file", str(work_dir / "annotations.log"),
-            "--export-timeout", str(export_timeout),
-            "--chunk-size", str(chunk_size),
-            "--chunk-export-timeout", str(export_timeout),
-            *resume_flag, *force_flag,
-        ]
-        image_dir = source_dir / "images"
-        if image_dir.exists() and any(path.is_file() for path in image_dir.iterdir()):
-            annotation_args.append("--prefer-chunked-all")
-        else:
-            console.print("[yellow]Local images not found; annotations_all will try CoralNet's full export before chunked fallback.[/yellow]")
-        run_legacy_module(
-            "scrape_annotations",
-            annotation_args,
-            console=console,
-            env_updates=auth_env,
+        annotation_paths = _selected_type_paths(
+            annotation_types,
+            source_dir / "annotations_all.csv",
+            source_dir / "annotations_confirmed.csv",
         )
+        if resume and not force and annotation_paths and _has_existing_files(annotation_paths):
+            console.print(f"[green]Skipping annotations[/green] [dim](existing: {', '.join(str(path) for path in annotation_paths)})[/dim]")
+        else:
+            console.print("[bold]Exporting annotations[/bold]")
+            annotation_args = [
+                "--input-csv", str(input_csv),
+                "--output-dir", str(output_dir),
+                "--annotation-types", annotation_types,
+                "--state-file", str(work_dir / "annotations_state.json"),
+                "--summary-file", str(work_dir / "annotations_summary.json"),
+                "--failures-file", str(work_dir / "annotations_failures.csv"),
+                "--log-file", str(work_dir / "annotations.log"),
+                "--export-timeout", str(export_timeout),
+                "--chunk-size", str(chunk_size),
+                "--chunk-export-timeout", str(export_timeout),
+                *resume_flag, *force_flag,
+            ]
+            image_dir = source_dir / "images"
+            if image_dir.exists() and any(path.is_file() for path in image_dir.iterdir()):
+                annotation_args.append("--prefer-chunked-all")
+            else:
+                console.print("[yellow]Local images not found; annotations_all will try CoralNet's full export before chunked fallback.[/yellow]")
+            run_legacy_module(
+                "scrape_annotations",
+                annotation_args,
+                console=console,
+                env_updates=auth_env,
+            )
 
     if "covers" in selected:
         covers_path = source_dir / "percent_cover.csv"
