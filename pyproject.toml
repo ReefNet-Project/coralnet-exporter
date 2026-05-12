@@ -9,6 +9,18 @@ description = "CLI for exporting CoralNet sources, images, labelsets, metadata, 
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+keywords = [
+  "coralnet",
+  "coralnet-export",
+  "coralnet-downloader",
+  "coral-reef",
+  "reef-monitoring",
+  "image-annotations",
+  "computer-vision",
+  "machine-learning-datasets",
+  "active-learning",
+  "marine-ecology",
+]
 authors = [
   {name = "CoralNet Exporter Contributors"}
 ]

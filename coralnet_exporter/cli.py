@@ -238,7 +238,7 @@ def download_cmd(
                     "--summary-file", str(work_dir / "images_summary.json"),
                     "--failures-file", str(work_dir / "images_failures.csv"),
                     "--log-file", str(work_dir / "images.log"),
-                    *resume_flag,
+                    *resume_flag, *common_auth,
                 ],
                 console=console,
             )

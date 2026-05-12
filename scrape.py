@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import os
 import re
 import threading
 import time
@@ -28,6 +29,7 @@ DEFAULT_SUMMARY_FILE = "scrape_summary.json"
 DEFAULT_FAILURES_FILE = "scrape_failures.csv"
 
 BASE_URL = "https://coralnet.ucsd.edu"
+LOGIN_URL = f"{BASE_URL}/accounts/login/"
 
 
 @dataclass
@@ -103,11 +105,14 @@ def request_with_retries(
     logger: logging.Logger,
     source_name: str,
     kind: str,
+    method: str = "GET",
+    **kwargs: Any,
 ) -> tuple[requests.Response | None, str | None]:
     error_msg = None
+    kwargs.setdefault("allow_redirects", True)
     for attempt in range(1, retries + 1):
         try:
-            resp = session.get(url, timeout=timeout, allow_redirects=True)
+            resp = session.request(method, url, timeout=timeout, **kwargs)
             if resp.status_code >= 500:
                 raise requests.HTTPError(f"HTTP {resp.status_code}")
             return resp, None
@@ -119,6 +124,60 @@ def request_with_retries(
             logger.warning(error_msg)
             time.sleep(min(2 ** (attempt - 1), 5))
     return None, error_msg
+
+
+def login(
+    session: requests.Session,
+    username: str,
+    password: str,
+    timeout: int,
+    retries: int,
+    logger: logging.Logger,
+    source_name: str,
+) -> None:
+    login_page, err = request_with_retries(
+        session=session,
+        url=LOGIN_URL,
+        timeout=timeout,
+        retries=retries,
+        logger=logger,
+        source_name=source_name,
+        kind="login-page",
+    )
+    if login_page is None:
+        raise RuntimeError(err or "failed to retrieve login page")
+
+    soup = BeautifulSoup(login_page.text, "html.parser")
+    token_input = soup.find("input", {"name": "csrfmiddlewaretoken"})
+    if token_input is None or not token_input.get("value"):
+        raise RuntimeError("CSRF token not found on login page")
+
+    payload = {
+        "username": username,
+        "password": password,
+        "stay_signed_in": "on",
+        "csrfmiddlewaretoken": token_input["value"],
+    }
+    headers = {"Referer": LOGIN_URL}
+
+    response, err = request_with_retries(
+        session=session,
+        url=LOGIN_URL,
+        timeout=timeout,
+        retries=retries,
+        logger=logger,
+        source_name=source_name,
+        kind="login",
+        method="POST",
+        data=payload,
+        headers=headers,
+    )
+    if response is None:
+        raise RuntimeError(err or "login request failed")
+
+    response_text = response.text.lower()
+    if "accounts/login" in str(response.url).lower() and "logout" not in response_text:
+        raise RuntimeError("login failed; check CoralNet credentials")
 
 
 def extract_extension_from_url(url: str | None) -> str | None:
@@ -294,6 +353,8 @@ def process_source(
     checkpoint_every: int,
     max_images_per_source: int | None,
     source_max_failures: int,
+    username: str | None,
+    password: str | None,
 ) -> SourceResult:
     source_name = normalize_source_name(row)
     source_url = row.get("URL") if "URL" in row else None
@@ -412,6 +473,45 @@ def process_source(
     visited_urls: set[str] = set()
 
     session = make_session()
+    if username and password:
+        try:
+            login(
+                session=session,
+                username=username,
+                password=password,
+                timeout=timeout,
+                retries=retries,
+                logger=logger,
+                source_name=source_name,
+            )
+            logger.info("[%s] authenticated with CoralNet", source_name)
+        except RuntimeError as exc:
+            msg = f"authentication failed: {exc}"
+            progress_store.upsert_source(
+                source_key,
+                {
+                    "status": "failed",
+                    "last_page_url": page_url,
+                    "last_error": msg,
+                    "downloaded_files": existing_count,
+                },
+                flush=True,
+            )
+            return SourceResult(
+                source_key=source_key,
+                source_name=source_name,
+                safe_source_name=safe_source_name,
+                status="failed",
+                expected_total=expected_total,
+                local_count=existing_count,
+                downloaded_in_run=0,
+                skipped_existing_in_run=0,
+                pages_visited=0,
+                last_page_url=page_url,
+                error=msg,
+            )
+    else:
+        logger.warning("[%s] no CoralNet credentials provided; downloading unauthenticated", source_name)
 
     source_bar = None
     source_bar_slot = None
@@ -871,6 +971,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download CoralNet source images with resume + reporting.")
     parser.add_argument("--input-csv", default=DEFAULT_INPUT_CSV, help="Input CSV path")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Output root directory")
+    parser.add_argument(
+        "--username",
+        default=os.getenv("CORALNET_USERNAME") or os.getenv("USERNAME"),
+        help="CoralNet username. Defaults to CORALNET_USERNAME, then USERNAME.",
+    )
+    parser.add_argument(
+        "--password",
+        default=os.getenv("CORALNET_PASSWORD") or os.getenv("PASSWORD"),
+        help="CoralNet password. Defaults to CORALNET_PASSWORD, then PASSWORD.",
+    )
     parser.add_argument("--workers", type=int, default=5, help="Number of source worker threads")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout seconds")
     parser.add_argument("--retries", type=int, default=4, help="Retries per request")
@@ -1019,13 +1129,14 @@ def main() -> int:
     logger = setup_logger(log_file=Path(args.log_file), level=args.log_level)
     logger.info("Starting CoralNet scrape")
     logger.info(
-        "Config: workers=%d shard=%d/%d timeout=%ds retries=%d strict_validation=%s",
+        "Config: workers=%d shard=%d/%d timeout=%ds retries=%d strict_validation=%s authenticated=%s",
         args.workers,
         args.shard_index,
         args.shard_count,
         args.timeout,
         args.retries,
         args.strict_image_validation,
+        bool(args.username and args.password),
     )
 
     df = pd.read_csv(args.input_csv)
@@ -1113,6 +1224,8 @@ def main() -> int:
                 args.checkpoint_every,
                 args.max_images_per_source,
                 args.source_max_failures,
+                args.username,
+                args.password,
             )
             for row in tasks
         ]
