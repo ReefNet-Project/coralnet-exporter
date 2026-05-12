@@ -1,0 +1,31 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python/build
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+
+# CoralNet output/runtime artifacts
+output/
+metadata/
+metadata_*/
+*.log
+*.out
+*.err
+*_progress_state*.json
+*_summary*.json
+*_failures*.csv
+_tmp*/
+_tmp_*

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coralnet-exporter"
+version = "0.1.0"
+description = "CLI for exporting CoralNet sources, images, labelsets, metadata, annotations, classifier info, and derived CSVs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  {name = "CoralNet Exporter Contributors"}
+]
+dependencies = [
+  "beautifulsoup4>=4.12",
+  "pandas>=1.5",
+  "requests>=2.31",
+  "rich>=13",
+  "tqdm>=4.66",
+  "click>=8.1",
+]
+
+[project.scripts]
+coralnet-exporter = "coralnet_exporter.cli:app"
+
+[tool.setuptools]
+py-modules = ["scrape", "crawl_labelset", "scrape_metadata", "scrape_annotations"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["coralnet_exporter*"]
