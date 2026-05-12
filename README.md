@@ -4,19 +4,6 @@
 
 It is designed for researchers, reef monitoring teams, machine learning engineers, and coral reef image analysis projects that need to export CoralNet images, annotations, metadata, labelsets, classifier information, percent cover, and calcification rates from public or authenticated private CoralNet sources.
 
-Common search terms for this project:
-
-- CoralNet downloader
-- CoralNet exporter
-- CoralNet annotations export
-- CoralNet metadata export
-- CoralNet image downloader
-- CoralNet labelset export
-- CoralNet percent cover export
-- CoralNet calcification rates export
-- Coral reef image annotation dataset download
-- CoralNet machine learning dataset preparation
-
 ## What This Tool Downloads
 
 For a CoralNet source ID or URL, `coralnet-exporter` can download:
@@ -225,6 +212,6 @@ sbatch run_coralnet_3354.sbatch
 
 ## Maintainer
 
-Maintained by Yahia Battach for the ReefNet Project.
+Maintained by [Yahia Battach](https://github.com/shakesBeardZ) for the ReefNet Project.
 
 For issues, feature requests, or contributions, use the GitHub repository issue tracker.
