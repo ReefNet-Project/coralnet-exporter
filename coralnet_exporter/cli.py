@@ -49,11 +49,28 @@ def _login_session(session: requests.Session, username: str, password: str, time
 
 
 def _parse_include(text: str) -> set[str]:
+    if text.strip().lower() == "all":
+        return set(ALL_EXPORTS)
     values = {item.strip().lower() for item in text.split(",") if item.strip()}
     unknown = values - ALL_EXPORTS
     if unknown:
         raise click.BadParameter(f"Unknown exports: {', '.join(sorted(unknown))}")
     return values
+
+
+def _prompt_include() -> str:
+    console.print("[bold]Choose exports to download[/bold]")
+    console.print(f"Available: {', '.join(sorted(ALL_EXPORTS))}")
+    console.print("Type a comma-separated list, or type 'all'.")
+
+    while True:
+        include = Prompt.ask("Exports", default=DEFAULT_INCLUDE).strip()
+        try:
+            _parse_include(include)
+        except click.BadParameter as exc:
+            console.print(f"[red]{exc.message}[/red]")
+            continue
+        return include
 
 
 def _source_output_dir(output_dir: Path, source_name: str) -> Path:
@@ -85,7 +102,7 @@ def login_cmd(username: str | None, password: str | None, env_file: Path, timeou
 @app.command("download")
 @click.argument("source", required=False)
 @click.option("--output-dir", type=click.Path(path_type=Path), default=Path("output"), show_default=True, help="Output directory.")
-@click.option("--include", default=DEFAULT_INCLUDE, show_default=True, help=f"Comma-separated exports. Available: {', '.join(sorted(ALL_EXPORTS))}.")
+@click.option("--include", default=None, help=f"Comma-separated exports, or 'all'. If omitted, prompt interactively. Available: {', '.join(sorted(ALL_EXPORTS))}.")
 @click.option("--username", default=None, help="CoralNet username.")
 @click.option("--password", default=None, help="CoralNet password. Prefer env/prompt over CLI.")
 @click.option("--env-file", type=click.Path(path_type=Path), default=Path(".env.coralnet"), help="Credentials env file.")
@@ -102,7 +119,7 @@ def login_cmd(username: str | None, password: str | None, env_file: Path, timeou
 def download_cmd(
     source: str | None,
     output_dir: Path,
-    include: str,
+    include: str | None,
     username: str | None,
     password: str | None,
     env_file: Path,
@@ -120,6 +137,8 @@ def download_cmd(
     """Download selected data products for one CoralNet source."""
     if source is None:
         source = Prompt.ask("CoralNet source ID or URL").strip()
+    if include is None:
+        include = _prompt_include()
     selected = _parse_include(include)
 
     if background:

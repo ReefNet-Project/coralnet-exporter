@@ -129,7 +129,7 @@ coralnet-exporter login --env-file .env.coralnet
 coralnet-exporter download 3354 --output-dir output --resume
 ```
 
-By default, this downloads images, labelset, metadata, annotations, and classifier information. Percent cover and calcification rates are optional because they can require source-specific choices.
+If `--include` is omitted, the CLI asks which exports to download. Press Enter to use the default selection: images, labelset, metadata, annotations, and classifier information. Percent cover and calcification rates are optional because they can require source-specific choices.
 
 Equivalent URL form:
 
@@ -144,6 +144,12 @@ coralnet-exporter download 3354 \
   --include images,labelset,metadata,annotations,classifier,covers,calcification \
   --output-dir output \
   --resume
+```
+
+Download every supported export:
+
+```bash
+coralnet-exporter download 3354 --include all --output-dir output --resume
 ```
 
 Available export names:
