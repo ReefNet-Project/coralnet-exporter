@@ -83,8 +83,8 @@ def _prompt_exports() -> tuple[str, str, str]:
     metadata_types: list[str] = []
     annotation_types: list[str] = []
     for label, export_name, default, help_text in EXPORT_PROMPTS:
-        marker = "[x]" if default else "[ ]"
-        answer = Confirm.ask(f"  {marker} {label}", default=default, show_default=False)
+        default_text = "default yes" if default else "default no"
+        answer = Confirm.ask(f"  {label} ({default_text})", default=default, show_default=False)
         if answer:
             if label == "metadata_all":
                 selected.add("metadata")
@@ -119,6 +119,10 @@ def _source_output_dir(output_dir: Path, source_name: str) -> Path:
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1F]', "_", source_name).strip()
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .") or "source"
     return output_dir / cleaned
+
+
+def _has_existing_files(paths: list[Path]) -> bool:
+    return all(path.exists() and path.stat().st_size > 0 for path in paths)
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -250,8 +254,13 @@ def download_cmd(
     force_flag = ["--force"] if force else []
 
     if "classifier" in selected:
-        console.print("[bold]Exporting classifier info[/bold]")
-        scrape_classifier_info(session, source_info.url, source_dir, timeout=timeout)
+        classifier_paths = [source_dir / "classifier_info.csv", source_dir / "classifier_info.json"]
+        if resume and not force and _has_existing_files(classifier_paths):
+            console.print(f"[green]Skipping classifier info[/green] [dim](existing: {classifier_paths[0]})[/dim]")
+        else:
+            console.print("[bold]Exporting classifier info[/bold]")
+            scrape_classifier_info(session, source_info.url, source_dir, timeout=timeout)
+            console.print(f"[green]Saved classifier info[/green] [dim]{classifier_paths[0]}[/dim]")
 
     if "labelset" in selected:
         console.print("[bold]Exporting labelset[/bold]")
@@ -338,34 +347,44 @@ def download_cmd(
         )
 
     if "covers" in selected:
-        console.print("[bold]Exporting percent cover / image covers[/bold]")
-        export_image_covers(session, source_info.url, source_dir, timeout=export_timeout)
+        covers_path = source_dir / "percent_cover.csv"
+        if resume and not force and _has_existing_files([covers_path]):
+            console.print(f"[green]Skipping percent cover[/green] [dim](existing: {covers_path})[/dim]")
+        else:
+            console.print("[bold]Exporting percent cover / image covers[/bold]")
+            saved_path = export_image_covers(session, source_info.url, source_dir, timeout=export_timeout)
+            console.print(f"[green]Saved percent cover[/green] [dim]{saved_path}[/dim]")
 
     if "calcification" in selected:
-        console.print("[bold]Exporting calcification rates[/bold]")
-        rate_table_id = calcification_rate_table_id
-        if not rate_table_id:
-            try:
-                choices = fetch_rate_table_choices(session, source_info.url, timeout=timeout)
-            except Exception as exc:
-                raise click.ClickException(
-                    "Could not discover calcification rate tables from the source page. "
-                    "Rerun with --calcification-rate-table-id. "
-                    f"Original error: {exc}"
-                ) from exc
-            if not choices:
-                raise click.ClickException("No calcification rate tables were found for this source.")
-            rate_table_id = choices[0].table_id
-            console.print(f"[dim]Using calcification rate table {choices[0].table_id}: {choices[0].name}[/dim]")
-        export_calcification_rates(
-            session=session,
-            source_url=source_info.url,
-            output_dir=source_dir,
-            rate_table_id=rate_table_id,
-            timeout=export_timeout,
-            label_display=calcification_label_display,
-            optional_columns=parse_calcification_optional_columns(calcification_optional_columns),
-        )
+        calcification_path = source_dir / "calcification_rates.csv"
+        if resume and not force and _has_existing_files([calcification_path]):
+            console.print(f"[green]Skipping calcification rates[/green] [dim](existing: {calcification_path})[/dim]")
+        else:
+            console.print("[bold]Exporting calcification rates[/bold]")
+            rate_table_id = calcification_rate_table_id
+            if not rate_table_id:
+                try:
+                    choices = fetch_rate_table_choices(session, source_info.url, timeout=timeout)
+                except Exception as exc:
+                    raise click.ClickException(
+                        "Could not discover calcification rate tables from the source page. "
+                        "Rerun with --calcification-rate-table-id. "
+                        f"Original error: {exc}"
+                    ) from exc
+                if not choices:
+                    raise click.ClickException("No calcification rate tables were found for this source.")
+                rate_table_id = choices[0].table_id
+                console.print(f"[dim]Using calcification rate table {choices[0].table_id}: {choices[0].name}[/dim]")
+            saved_path = export_calcification_rates(
+                session=session,
+                source_url=source_info.url,
+                output_dir=source_dir,
+                rate_table_id=rate_table_id,
+                timeout=export_timeout,
+                label_display=calcification_label_display,
+                optional_columns=parse_calcification_optional_columns(calcification_optional_columns),
+            )
+            console.print(f"[green]Saved calcification rates[/green] [dim]{saved_path}[/dim]")
 
     console.print("[green]Export run finished.[/green]")
     console.print(f"Logs/state: {work_dir}")

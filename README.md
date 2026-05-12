@@ -136,16 +136,16 @@ CoralNet username:
 CoralNet password:
 Source URL or ID:
 What do you want to download?
-  [x] source info
-  [x] images
-  [x] labelset
-  [x] metadata_all
-  [x] metadata_confirmed
-  [x] annotations_all
-  [x] annotations_confirmed
-  [ ] percent cover
-  [ ] calcification rates
-  [x] classifier info
+  source info (default yes)
+  images (default yes)
+  labelset (default yes)
+  metadata_all (default yes)
+  metadata_confirmed (default yes)
+  annotations_all (default yes)
+  annotations_confirmed (default yes)
+  percent cover (default no)
+  calcification rates (default no)
+  classifier info (default yes)
 Run in background? [y/n]
 Output directory:
 ```
