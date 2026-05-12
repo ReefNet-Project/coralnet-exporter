@@ -191,6 +191,7 @@ def download_cmd(
         background = Confirm.ask("Run in background?", default=False)
     if output_dir is None:
         output_dir = Path(Prompt.ask("Output directory", default="output").strip())
+    output_dir = output_dir.expanduser().resolve()
     selected = _parse_include(include)
 
     if background:
