@@ -9,7 +9,7 @@ import click
 import requests
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 
 from .auth import resolve_credentials
 from .calcification import export_calcification_rates, fetch_rate_table_choices, parse_optional_columns as parse_calcification_optional_columns
@@ -22,6 +22,25 @@ from .source import discover_source, normalize_source_ref, write_single_source_c
 console = Console()
 
 DEFAULT_INCLUDE = "images,labelset,metadata,annotations,classifier"
+DEFAULT_EXPORTS = {
+    "images",
+    "labelset",
+    "metadata",
+    "annotations",
+    "classifier",
+}
+EXPORT_PROMPTS = [
+    ("source info", "source", True, "Always saved as .coralnet-exporter/source.csv"),
+    ("images", "images", True, "Download source images"),
+    ("labelset", "labelset", True, "Download labelset.csv"),
+    ("metadata_all", "metadata", True, "Included in metadata export"),
+    ("metadata_confirmed", "metadata", True, "Included in metadata export"),
+    ("annotations_all", "annotations", True, "Included in annotations export"),
+    ("annotations_confirmed", "annotations", True, "Included in annotations export"),
+    ("percent cover", "covers", False, "Download percent_cover.csv"),
+    ("calcification rates", "calcification", False, "Download calcification_rates.csv"),
+    ("classifier info", "classifier", True, "Download classifier_info.csv/json"),
+]
 ALL_EXPORTS = {
     "images",
     "labelset",
@@ -58,19 +77,40 @@ def _parse_include(text: str) -> set[str]:
     return values
 
 
-def _prompt_include() -> str:
-    console.print("[bold]Choose exports to download[/bold]")
-    console.print(f"Available: {', '.join(sorted(ALL_EXPORTS))}")
-    console.print("Type a comma-separated list, or type 'all'.")
+def _prompt_exports() -> tuple[str, str, str]:
+    console.print("[bold]What do you want to download?[/bold]")
+    selected: set[str] = set()
+    metadata_types: list[str] = []
+    annotation_types: list[str] = []
+    for label, export_name, default, help_text in EXPORT_PROMPTS:
+        marker = "[x]" if default else "[ ]"
+        answer = Confirm.ask(f"  {marker} {label}", default=default, show_default=False)
+        if answer:
+            if label == "metadata_all":
+                selected.add("metadata")
+                metadata_types.append("all")
+            elif label == "metadata_confirmed":
+                selected.add("metadata")
+                metadata_types.append("on_confirmed")
+            elif label == "annotations_all":
+                selected.add("annotations")
+                annotation_types.append("all")
+            elif label == "annotations_confirmed":
+                selected.add("annotations")
+                annotation_types.append("on_confirmed")
+            elif export_name != "source":
+                selected.add(export_name)
+        if help_text and label == "source info":
+            console.print(f"      [dim]{help_text}[/dim]")
 
-    while True:
-        include = Prompt.ask("Exports", default=DEFAULT_INCLUDE).strip()
-        try:
-            _parse_include(include)
-        except click.BadParameter as exc:
-            console.print(f"[red]{exc.message}[/red]")
-            continue
-        return include
+    if not selected:
+        raise click.ClickException("No exports selected.")
+    include = ",".join(name for name in DEFAULT_INCLUDE.split(",") if name in selected) + "".join(
+        f",{name}" for name in sorted(selected - DEFAULT_EXPORTS)
+    )
+    return include.strip(","), ",".join(metadata_types or ["all", "on_confirmed"]), ",".join(
+        annotation_types or ["all", "on_confirmed"]
+    )
 
 
 def _source_output_dir(output_dir: Path, source_name: str) -> Path:
@@ -101,8 +141,10 @@ def login_cmd(username: str | None, password: str | None, env_file: Path, timeou
 
 @app.command("download")
 @click.argument("source", required=False)
-@click.option("--output-dir", type=click.Path(path_type=Path), default=Path("output"), show_default=True, help="Output directory.")
+@click.option("--output-dir", type=click.Path(path_type=Path), default=None, help="Output directory. If omitted, prompt interactively.")
 @click.option("--include", default=None, help=f"Comma-separated exports, or 'all'. If omitted, prompt interactively. Available: {', '.join(sorted(ALL_EXPORTS))}.")
+@click.option("--metadata-types", default="all,on_confirmed", show_default=True, help="Comma-separated metadata exports: all,on_confirmed.")
+@click.option("--annotation-types", default="all,on_confirmed", show_default=True, help="Comma-separated annotation exports: all,on_confirmed.")
 @click.option("--username", default=None, help="CoralNet username.")
 @click.option("--password", default=None, help="CoralNet password. Prefer env/prompt over CLI.")
 @click.option("--env-file", type=click.Path(path_type=Path), default=Path(".env.coralnet"), help="Credentials env file.")
@@ -118,8 +160,10 @@ def login_cmd(username: str | None, password: str | None, env_file: Path, timeou
 @click.option("--calcification-optional-columns", default="", show_default=True, help="Comma-separated: per_label_mean,per_label_bounds.")
 def download_cmd(
     source: str | None,
-    output_dir: Path,
+    output_dir: Path | None,
     include: str | None,
+    metadata_types: str,
+    annotation_types: str,
     username: str | None,
     password: str | None,
     env_file: Path,
@@ -135,10 +179,18 @@ def download_cmd(
     calcification_optional_columns: str,
 ) -> None:
     """Download selected data products for one CoralNet source."""
+    guided_exports = include is None
+
+    creds = resolve_credentials(username=username, password=password, env_file=env_file, interactive=True, console=console)
+
     if source is None:
-        source = Prompt.ask("CoralNet source ID or URL").strip()
-    if include is None:
-        include = _prompt_include()
+        source = Prompt.ask("Source URL or ID").strip()
+    if guided_exports:
+        include, metadata_types, annotation_types = _prompt_exports()
+    if guided_exports and not background:
+        background = Confirm.ask("Run in background?", default=False)
+    if output_dir is None:
+        output_dir = Path(Prompt.ask("Output directory", default="output").strip())
     selected = _parse_include(include)
 
     if background:
@@ -152,6 +204,10 @@ def download_cmd(
             str(output_dir),
             "--include",
             include,
+            "--metadata-types",
+            metadata_types,
+            "--annotation-types",
+            annotation_types,
             "--env-file",
             str(env_file),
         ]
@@ -161,13 +217,19 @@ def download_cmd(
         log_dir = output_dir / "_coralnet_exporter_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"source_{normalize_source_ref(source).source_id}.log"
+        env = os.environ.copy()
+        env.update(
+            {
+                "CORALNET_USERNAME": creds.username,
+                "CORALNET_PASSWORD": creds.password,
+            }
+        )
         with log_path.open("ab") as log:
-            subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)
         console.print(f"Started background job. Log: [bold]{log_path}[/bold]")
         console.print(f"Monitor with: tail -f {log_path}")
         return
 
-    creds = resolve_credentials(username=username, password=password, env_file=env_file, interactive=True, console=console)
     session = _session()
     _login_session(session, creds.username, creds.password, timeout)
     source_info = discover_source(session, source, timeout=timeout)
@@ -179,7 +241,10 @@ def download_cmd(
 
     console.print(Panel.fit(f"Source {source_info.source_id}: {source_info.name}\nOutput: {source_dir}", title="CoralNet Exporter"))
 
-    common_auth = ["--username", creds.username, "--password", creds.password]
+    auth_env = {
+        "CORALNET_USERNAME": creds.username,
+        "CORALNET_PASSWORD": creds.password,
+    }
     resume_flag = ["--resume"] if resume else []
     force_flag = ["--force"] if force else []
 
@@ -198,9 +263,10 @@ def download_cmd(
                 "--summary-file", str(work_dir / "labelset_summary.json"),
                 "--failures-file", str(work_dir / "labelset_failures.csv"),
                 "--log-file", str(work_dir / "labelset.log"),
-                *resume_flag, *force_flag, *common_auth,
+                *resume_flag, *force_flag,
             ],
             console=console,
+            env_updates=auth_env,
         )
 
     if "metadata" in selected:
@@ -210,36 +276,16 @@ def download_cmd(
             [
                 "--input-csv", str(input_csv),
                 "--output-dir", str(output_dir),
-                "--metadata-types", "all,on_confirmed",
+                "--metadata-types", metadata_types,
                 "--state-file", str(work_dir / "metadata_state.json"),
                 "--summary-file", str(work_dir / "metadata_summary.json"),
                 "--failures-file", str(work_dir / "metadata_failures.csv"),
                 "--log-file", str(work_dir / "metadata.log"),
                 "--export-timeout", str(export_timeout),
-                *resume_flag, *force_flag, *common_auth,
+                *resume_flag, *force_flag,
             ],
             console=console,
-        )
-
-    if "annotations" in selected:
-        console.print("[bold]Exporting annotations[/bold]")
-        run_legacy_module(
-            "scrape_annotations",
-            [
-                "--input-csv", str(input_csv),
-                "--output-dir", str(output_dir),
-                "--annotation-types", "all,on_confirmed",
-                "--state-file", str(work_dir / "annotations_state.json"),
-                "--summary-file", str(work_dir / "annotations_summary.json"),
-                "--failures-file", str(work_dir / "annotations_failures.csv"),
-                "--log-file", str(work_dir / "annotations.log"),
-                "--export-timeout", str(export_timeout),
-                "--prefer-chunked-all",
-                "--chunk-size", str(chunk_size),
-                "--chunk-export-timeout", str(export_timeout),
-                *resume_flag, *force_flag, *common_auth,
-            ],
-            console=console,
+            env_updates=auth_env,
         )
 
     if "images" in selected:
@@ -257,10 +303,38 @@ def download_cmd(
                     "--summary-file", str(work_dir / "images_summary.json"),
                     "--failures-file", str(work_dir / "images_failures.csv"),
                     "--log-file", str(work_dir / "images.log"),
-                    *resume_flag, *common_auth,
+                    *resume_flag,
                 ],
                 console=console,
+                env_updates=auth_env,
             )
+
+    if "annotations" in selected:
+        console.print("[bold]Exporting annotations[/bold]")
+        annotation_args = [
+            "--input-csv", str(input_csv),
+            "--output-dir", str(output_dir),
+            "--annotation-types", annotation_types,
+            "--state-file", str(work_dir / "annotations_state.json"),
+            "--summary-file", str(work_dir / "annotations_summary.json"),
+            "--failures-file", str(work_dir / "annotations_failures.csv"),
+            "--log-file", str(work_dir / "annotations.log"),
+            "--export-timeout", str(export_timeout),
+            "--chunk-size", str(chunk_size),
+            "--chunk-export-timeout", str(export_timeout),
+            *resume_flag, *force_flag,
+        ]
+        image_dir = source_dir / "images"
+        if image_dir.exists() and any(path.is_file() for path in image_dir.iterdir()):
+            annotation_args.append("--prefer-chunked-all")
+        else:
+            console.print("[yellow]Local images not found; annotations_all will try CoralNet's full export before chunked fallback.[/yellow]")
+        run_legacy_module(
+            "scrape_annotations",
+            annotation_args,
+            console=console,
+            env_updates=auth_env,
+        )
 
     if "covers" in selected:
         console.print("[bold]Exporting percent cover / image covers[/bold]")

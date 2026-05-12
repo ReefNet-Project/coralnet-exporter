@@ -20,12 +20,19 @@ def module_script_path(module_name: str) -> Path:
     return Path(spec.origin)
 
 
-def run_legacy_module(module_name: str, args: list[str], console: Console | None = None) -> None:
+def run_legacy_module(
+    module_name: str,
+    args: list[str],
+    console: Console | None = None,
+    env_updates: dict[str, str] | None = None,
+) -> None:
     console = console or Console()
     script_path = module_script_path(module_name)
     cmd = [sys.executable, str(script_path), *args]
     console.print(f"[dim]Running:[/dim] {' '.join(cmd)}")
     env = os.environ.copy()
+    if env_updates:
+        env.update(env_updates)
     process = subprocess.run(cmd, env=env)
     if process.returncode != 0:
         raise LegacyScriptError(f"{module_name} failed with exit code {process.returncode}")
