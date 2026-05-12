@@ -129,6 +129,8 @@ coralnet-exporter login --env-file .env.coralnet
 coralnet-exporter download 3354 --output-dir output --resume
 ```
 
+By default, this downloads images, labelset, metadata, annotations, and classifier information. Percent cover and calcification rates are optional because they can require source-specific choices.
+
 Equivalent URL form:
 
 ```bash

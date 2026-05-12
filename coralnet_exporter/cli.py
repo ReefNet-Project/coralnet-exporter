@@ -21,7 +21,7 @@ from .source import discover_source, normalize_source_ref, write_single_source_c
 
 console = Console()
 
-DEFAULT_INCLUDE = "labelset,metadata,annotations,classifier"
+DEFAULT_INCLUDE = "images,labelset,metadata,annotations,classifier"
 ALL_EXPORTS = {
     "images",
     "labelset",
