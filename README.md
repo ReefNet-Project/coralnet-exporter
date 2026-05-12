@@ -212,6 +212,6 @@ sbatch run_coralnet_3354.sbatch
 
 ## Maintainer
 
-Maintained by [Yahia Battach](https://github.com/shakesBeardZ) for the ReefNet Project.
+Maintained by [Yahia Battach](https://github.com/shakesBeardZ) for the ReefNetAI platform: https://reefnet.kaust.edu.sa/
 
 For issues, feature requests, or contributions, use the GitHub repository issue tracker.
