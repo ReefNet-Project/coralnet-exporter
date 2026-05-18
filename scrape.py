@@ -30,6 +30,7 @@ DEFAULT_FAILURES_FILE = "scrape_failures.csv"
 
 BASE_URL = "https://coralnet.ucsd.edu"
 LOGIN_URL = f"{BASE_URL}/accounts/login/"
+IMAGE_SCOPES = {"all", "confirmed"}
 
 
 @dataclass
@@ -261,6 +262,81 @@ def parse_image_page(html: bytes, page_url: str) -> dict[str, str | None]:
     }
 
 
+def image_subdir_for_scope(image_scope: str) -> str:
+    return "images_confirmed" if image_scope == "confirmed" else "images"
+
+
+def parse_browse_image_links(html: bytes, browse_url: str) -> list[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    links: list[str] = []
+    seen: set[str] = set()
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"]
+        if not re.search(r"/image/\d+/view/?", href):
+            continue
+        url = urljoin(browse_url, href)
+        if url not in seen:
+            links.append(url)
+            seen.add(url)
+    return links
+
+
+def parse_next_browse_url(html: bytes, browse_url: str) -> str | None:
+    soup = BeautifulSoup(html, "html.parser")
+    next_anchor = soup.find("a", class_="prev-next-page", title=lambda value: value and "next" in value.lower())
+    if next_anchor and next_anchor.get("href"):
+        return urljoin(browse_url, next_anchor["href"])
+
+    for anchor in soup.find_all("a", href=True):
+        text = anchor.get_text(" ", strip=True)
+        if text in {">", "Next", "Next page"}:
+            return urljoin(browse_url, anchor["href"])
+    return None
+
+
+def collect_confirmed_image_page_urls(
+    session: requests.Session,
+    source_url: str,
+    timeout: int,
+    retries: int,
+    logger: logging.Logger,
+    source_name: str,
+) -> tuple[list[str] | None, str | None]:
+    source_url = source_url if source_url.endswith("/") else f"{source_url}/"
+    browse_url = urljoin(source_url, "browse/images/?annotation_status=confirmed")
+    image_page_urls: list[str] = []
+    seen_browse_urls: set[str] = set()
+    seen_image_urls: set[str] = set()
+
+    while browse_url:
+        if browse_url in seen_browse_urls:
+            return None, f"detected browse pagination loop at {browse_url}"
+        seen_browse_urls.add(browse_url)
+
+        response, error = request_with_retries(
+            session=session,
+            url=browse_url,
+            timeout=timeout,
+            retries=retries,
+            logger=logger,
+            source_name=source_name,
+            kind="confirmed-browse",
+        )
+        if response is None:
+            return None, error or f"failed to fetch confirmed browse page {browse_url}"
+        if response.status_code != 200:
+            return None, f"confirmed browse page returned HTTP {response.status_code} for {browse_url}"
+
+        for image_url in parse_browse_image_links(response.content, browse_url):
+            if image_url not in seen_image_urls:
+                image_page_urls.append(image_url)
+                seen_image_urls.add(image_url)
+
+        browse_url = parse_next_browse_url(response.content, browse_url)
+
+    return image_page_urls, None
+
+
 class ProgressStore:
     def __init__(self, state_path: Path, resume: bool, reset_state: bool):
         self.state_path = state_path
@@ -355,16 +431,20 @@ def process_source(
     source_max_failures: int,
     username: str | None,
     password: str | None,
+    image_scope: str,
 ) -> SourceResult:
     source_name = normalize_source_name(row)
     source_url = row.get("URL") if "URL" in row else None
-    source_key = stable_source_key(source_name=source_name, source_url=source_url if isinstance(source_url, str) else None)
+    source_key_url = source_url if isinstance(source_url, str) else None
+    if image_scope != "all":
+        source_key_url = f"{source_key_url or ''}|image_scope={image_scope}"
+    source_key = stable_source_key(source_name=source_name, source_url=source_key_url)
     safe_source_name = sanitize_filename(source_name, default=source_key)
 
-    expected_total = parse_int(row.get("Total Images"))
+    expected_total = parse_int(row.get("Total Images")) if image_scope == "all" else None
     first_image_number = parse_int(row.get("FirstImageNumber"))
 
-    source_dir = output_dir / safe_source_name / "images"
+    source_dir = output_dir / safe_source_name / image_subdir_for_scope(image_scope)
     source_dir.mkdir(parents=True, exist_ok=True)
 
     existing_files = [p for p in source_dir.iterdir() if p.is_file()]
@@ -381,6 +461,7 @@ def process_source(
             "source_url": source_url,
             "expected_total": expected_total,
             "first_image_number": first_image_number,
+            "image_scope": image_scope,
             "status": "in_progress",
             "attempts": attempts,
             "downloaded_files": existing_count,
@@ -439,9 +520,9 @@ def process_source(
             error=None,
         )
 
-    if entry.get("last_page_url"):
+    if image_scope == "all" and entry.get("last_page_url"):
         page_url = str(entry.get("last_page_url"))
-    else:
+    elif image_scope == "all":
         if first_image_number is None:
             msg = "missing FirstImageNumber"
             progress_store.upsert_source(
@@ -466,11 +547,14 @@ def process_source(
                 error=msg,
             )
         page_url = f"{BASE_URL}/image/{first_image_number}/view/"
+    else:
+        page_url = None
 
     downloaded_in_run = 0
     skipped_existing_in_run = 0
     pages_visited = 0
     visited_urls: set[str] = set()
+    filtered_page_urls: list[str] | None = None
 
     session = make_session()
     if username and password:
@@ -512,6 +596,109 @@ def process_source(
             )
     else:
         logger.warning("[%s] no CoralNet credentials provided; downloading unauthenticated", source_name)
+
+    if image_scope == "confirmed":
+        if not isinstance(source_url, str) or not source_url.strip():
+            msg = "missing source URL for confirmed image browse"
+            progress_store.upsert_source(
+                source_key,
+                {
+                    "status": "failed",
+                    "last_page_url": None,
+                    "last_error": msg,
+                    "downloaded_files": existing_count,
+                },
+                flush=True,
+            )
+            return SourceResult(
+                source_key=source_key,
+                source_name=source_name,
+                safe_source_name=safe_source_name,
+                status="failed",
+                expected_total=expected_total,
+                local_count=existing_count,
+                downloaded_in_run=0,
+                skipped_existing_in_run=0,
+                pages_visited=0,
+                last_page_url=None,
+                error=msg,
+            )
+
+        collected_urls, collect_error = collect_confirmed_image_page_urls(
+            session=session,
+            source_url=source_url.strip(),
+            timeout=timeout,
+            retries=retries,
+            logger=logger,
+            source_name=source_name,
+        )
+        if collected_urls is None:
+            msg = collect_error or "failed to collect confirmed image pages"
+            progress_store.upsert_source(
+                source_key,
+                {
+                    "status": "failed",
+                    "last_page_url": None,
+                    "last_error": msg,
+                    "downloaded_files": existing_count,
+                },
+                flush=True,
+            )
+            return SourceResult(
+                source_key=source_key,
+                source_name=source_name,
+                safe_source_name=safe_source_name,
+                status="failed",
+                expected_total=expected_total,
+                local_count=existing_count,
+                downloaded_in_run=0,
+                skipped_existing_in_run=0,
+                pages_visited=0,
+                last_page_url=None,
+                error=msg,
+            )
+
+        expected_total = len(collected_urls)
+        resume_url = str(entry.get("last_page_url") or "")
+        if resume_url and resume_url in collected_urls:
+            collected_urls = collected_urls[collected_urls.index(resume_url) :]
+        filtered_page_urls = collected_urls
+        page_url = filtered_page_urls[0] if filtered_page_urls else None
+        progress_store.upsert_source(
+            source_key,
+            {
+                "expected_total": expected_total,
+                "downloaded_files": existing_count,
+                "last_error": None,
+            },
+            flush=True,
+        )
+
+        if page_url is None:
+            progress_store.upsert_source(
+                source_key,
+                {
+                    "status": "done",
+                    "last_page_url": None,
+                    "downloaded_files": existing_count,
+                    "last_error": None,
+                },
+                flush=True,
+            )
+            logger.info("[%s] no confirmed images found", source_name)
+            return SourceResult(
+                source_key=source_key,
+                source_name=source_name,
+                safe_source_name=safe_source_name,
+                status="done",
+                expected_total=expected_total,
+                local_count=existing_count,
+                downloaded_in_run=0,
+                skipped_existing_in_run=0,
+                pages_visited=0,
+                last_page_url=None,
+                error=None,
+            )
 
     source_bar = None
     source_bar_slot = None
@@ -623,6 +810,9 @@ def process_source(
             image_name = parsed.get("image_name") or parsed.get("image_id") or "image"
             next_url = parsed.get("next_url")
             image_id = parsed.get("image_id")
+            if filtered_page_urls is not None:
+                next_index = pages_visited + 1
+                next_url = filtered_page_urls[next_index] if next_index < len(filtered_page_urls) else None
 
             if not image_url:
                 msg = f"missing image URL on page {page_url}"
@@ -955,6 +1145,7 @@ def build_summary(
         "input_csv": args.input_csv,
         "output_dir": args.output_dir,
         "workers": args.workers,
+        "image_scope": args.image_scope,
         "shard_index": args.shard_index,
         "shard_count": args.shard_count,
         "strict_image_validation": args.strict_image_validation,
@@ -982,6 +1173,12 @@ def parse_args() -> argparse.Namespace:
         help="CoralNet password. Defaults to CORALNET_PASSWORD, then PASSWORD.",
     )
     parser.add_argument("--workers", type=int, default=5, help="Number of source worker threads")
+    parser.add_argument(
+        "--image-scope",
+        choices=sorted(IMAGE_SCOPES),
+        default="all",
+        help="Image set to download: all source images or confirmed images only",
+    )
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout seconds")
     parser.add_argument("--retries", type=int, default=4, help="Retries per request")
     parser.add_argument(
@@ -1078,6 +1275,7 @@ def write_download_paths_to_csv(
     output_dir: Path,
     shard_count: int,
     shard_index: int,
+    image_scope: str,
 ) -> int:
     out_df = df.copy()
     if "DownloadedSourcePath" not in out_df.columns:
@@ -1087,12 +1285,15 @@ def write_download_paths_to_csv(
     for idx, row in out_df.iterrows():
         source_name = normalize_source_name(row)
         source_url = row.get("URL") if "URL" in row else None
-        source_key = stable_source_key(source_name, source_url if isinstance(source_url, str) else None)
+        source_key_url = source_url if isinstance(source_url, str) else None
+        if image_scope != "all":
+            source_key_url = f"{source_key_url or ''}|image_scope={image_scope}"
+        source_key = stable_source_key(source_name, source_key_url)
         if source_shard(source_key, shard_count) != shard_index:
             continue
 
         safe_source_name = sanitize_filename(source_name, default=source_key)
-        source_dir = (output_dir / safe_source_name / "images").resolve()
+        source_dir = (output_dir / safe_source_name / image_subdir_for_scope(image_scope)).resolve()
         if count_local_images(source_dir) > 0:
             out_df.at[idx, "DownloadedSourcePath"] = str(source_dir)
             updated_rows += 1
@@ -1129,10 +1330,11 @@ def main() -> int:
     logger = setup_logger(log_file=Path(args.log_file), level=args.log_level)
     logger.info("Starting CoralNet scrape")
     logger.info(
-        "Config: workers=%d shard=%d/%d timeout=%ds retries=%d strict_validation=%s authenticated=%s",
+        "Config: workers=%d shard=%d/%d image_scope=%s timeout=%ds retries=%d strict_validation=%s authenticated=%s",
         args.workers,
         args.shard_index,
         args.shard_count,
+        args.image_scope,
         args.timeout,
         args.retries,
         args.strict_image_validation,
@@ -1142,7 +1344,7 @@ def main() -> int:
     df = pd.read_csv(args.input_csv)
     logger.info("Loaded %d rows from %s", len(df), args.input_csv)
 
-    required_cols = ["FirstImageNumber"]
+    required_cols = ["FirstImageNumber"] if args.image_scope == "all" else ["URL"]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns in CSV: {missing}")
@@ -1160,16 +1362,19 @@ def main() -> int:
     for _, row in df.iterrows():
         source_name = normalize_source_name(row)
         source_url = row.get("URL") if "URL" in row else None
-        source_key = stable_source_key(source_name, source_url if isinstance(source_url, str) else None)
+        source_key_url = source_url if isinstance(source_url, str) else None
+        if args.image_scope != "all":
+            source_key_url = f"{source_key_url or ''}|image_scope={args.image_scope}"
+        source_key = stable_source_key(source_name, source_key_url)
         if source_shard(source_key, args.shard_count) == args.shard_index:
             entry = progress_store.get_source(source_key)
             if entry.get("status") == "done":
                 skipped_done_by_state += 1
                 continue
 
-            expected_total = parse_int(row.get("Total Images"))
+            expected_total = parse_int(row.get("Total Images")) if args.image_scope == "all" else None
             safe_source_name = sanitize_filename(source_name, default=source_key)
-            source_dir = output_dir / safe_source_name / "images"
+            source_dir = output_dir / safe_source_name / image_subdir_for_scope(args.image_scope)
             local_count = count_local_images(source_dir)
             if expected_total is not None and local_count >= expected_total:
                 skipped_done_by_disk += 1
@@ -1226,6 +1431,7 @@ def main() -> int:
                 args.source_max_failures,
                 args.username,
                 args.password,
+                args.image_scope,
             )
             for row in tasks
         ]
@@ -1291,6 +1497,7 @@ def main() -> int:
             output_dir=output_dir,
             shard_count=args.shard_count,
             shard_index=args.shard_index,
+            image_scope=args.image_scope,
         )
         logger.info(
             "Updated DownloadedSourcePath for %d rows in %s",

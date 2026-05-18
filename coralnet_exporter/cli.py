@@ -114,12 +114,25 @@ def _prompt_exports() -> tuple[str, str, str]:
     )
 
 
+def _prompt_image_scope() -> str:
+    return Prompt.ask(
+        "Images to download",
+        choices=["all", "confirmed"],
+        default="all",
+        show_choices=True,
+    )
+
+
 def _source_output_dir(output_dir: Path, source_name: str) -> Path:
     import re
 
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1F]', "_", source_name).strip()
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .") or "source"
     return output_dir / cleaned
+
+
+def _image_dir_for_scope(source_dir: Path, image_scope: str) -> Path:
+    return source_dir / ("images_confirmed" if image_scope == "confirmed" else "images")
 
 
 def _has_existing_files(paths: list[Path]) -> bool:
@@ -176,6 +189,7 @@ def login_cmd(username: str | None, password: str | None, env_file: Path, timeou
 @click.option("--include", default=None, help=f"Comma-separated exports, or 'all'. If omitted, prompt interactively. Available: {', '.join(sorted(ALL_EXPORTS))}.")
 @click.option("--metadata-types", default="all,on_confirmed", show_default=True, help="Comma-separated metadata exports: all,on_confirmed.")
 @click.option("--annotation-types", default="all,on_confirmed", show_default=True, help="Comma-separated annotation exports: all,on_confirmed.")
+@click.option("--image-scope", type=click.Choice(["all", "confirmed"]), default=None, help="Images to download. If omitted in guided mode, prompt interactively.")
 @click.option("--username", default=None, help="CoralNet username.")
 @click.option("--password", default=None, help="CoralNet password. Prefer env/prompt over CLI.")
 @click.option("--env-file", type=click.Path(path_type=Path), default=Path(".env.coralnet"), help="Credentials env file.")
@@ -195,6 +209,7 @@ def download_cmd(
     include: str | None,
     metadata_types: str,
     annotation_types: str,
+    image_scope: str | None,
     username: str | None,
     password: str | None,
     env_file: Path,
@@ -218,12 +233,15 @@ def download_cmd(
         source = Prompt.ask("Source URL or ID").strip()
     if guided_exports:
         include, metadata_types, annotation_types = _prompt_exports()
+    selected = _parse_include(include)
+    if "images" in selected and image_scope is None and guided_exports:
+        image_scope = _prompt_image_scope()
+    image_scope = image_scope or "all"
     if guided_exports and not background:
         background = Confirm.ask("Run in background?", default=False)
     if output_dir is None:
         output_dir = Path(Prompt.ask("Output directory", default="output").strip())
     output_dir = output_dir.expanduser().resolve()
-    selected = _parse_include(include)
 
     if background:
         cmd = [
@@ -240,6 +258,8 @@ def download_cmd(
             metadata_types,
             "--annotation-types",
             annotation_types,
+            "--image-scope",
+            image_scope,
             "--env-file",
             str(env_file),
         ]
@@ -338,9 +358,10 @@ def download_cmd(
             )
 
     if "images" in selected:
-        image_dir = source_dir / "images"
-        images_state = work_dir / "images_state.json"
-        expected_images = source_info.total_images
+        image_dir = _image_dir_for_scope(source_dir, image_scope)
+        image_prefix = "images_confirmed" if image_scope == "confirmed" else "images"
+        images_state = work_dir / f"{image_prefix}_state.json"
+        expected_images = source_info.total_images if image_scope == "all" else None
         local_images = _count_files(image_dir)
         images_done = _state_has_done_source(images_state) or (
             expected_images is not None and local_images >= expected_images
@@ -357,10 +378,11 @@ def download_cmd(
                     "--input-csv", str(input_csv),
                     "--output-dir", str(output_dir),
                     "--workers", str(workers),
-                    "--state-file", str(work_dir / "images_state.json"),
-                    "--summary-file", str(work_dir / "images_summary.json"),
-                    "--failures-file", str(work_dir / "images_failures.csv"),
-                    "--log-file", str(work_dir / "images.log"),
+                    "--image-scope", image_scope,
+                    "--state-file", str(images_state),
+                    "--summary-file", str(work_dir / f"{image_prefix}_summary.json"),
+                    "--failures-file", str(work_dir / f"{image_prefix}_failures.csv"),
+                    "--log-file", str(work_dir / f"{image_prefix}.log"),
                     *resume_flag,
                 ],
                 console=console,
@@ -451,9 +473,18 @@ def download_cmd(
 @click.option("--output", "output_path", type=click.Path(path_type=Path), default=Path("run_coralnet_export.sbatch"), show_default=True, help="Path to write sbatch file.")
 @click.option("--output-dir", type=click.Path(path_type=Path), default=Path("output"), show_default=True, help="Exporter output directory.")
 @click.option("--include", default=DEFAULT_INCLUDE, show_default=True, help="Comma-separated exports.")
+@click.option("--image-scope", type=click.Choice(["all", "confirmed"]), default="all", show_default=True, help="Images to download in generated Slurm job.")
 @click.option("--conda-setup", default="/home/$USER/miniconda3/etc/profile.d/conda.sh", show_default=True, help="Conda setup script path.")
 @click.option("--conda-env", default=None, help="Conda env path/name.")
-def make_slurm_cmd(source: str, output_path: Path, output_dir: Path, include: str, conda_setup: str | None, conda_env: str | None) -> None:
+def make_slurm_cmd(
+    source: str,
+    output_path: Path,
+    output_dir: Path,
+    include: str,
+    image_scope: str,
+    conda_setup: str | None,
+    conda_env: str | None,
+) -> None:
     """Generate a Slurm script for a CoralNet export."""
     script = render_slurm_script(
         source=source,
@@ -461,6 +492,7 @@ def make_slurm_cmd(source: str, output_path: Path, output_dir: Path, include: st
         conda_setup=conda_setup,
         conda_env=conda_env,
         include=include,
+        image_scope=image_scope,
     )
     output_path.write_text(script, encoding="utf-8")
     console.print(f"Wrote [bold]{output_path}[/bold]")

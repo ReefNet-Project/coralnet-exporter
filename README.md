@@ -146,6 +146,7 @@ What do you want to download?
   percent cover (default no)
   calcification rates (default no)
   classifier info (default yes)
+Images to download [all/confirmed]:
 Run in background? [y/n]
 Output directory:
 ```
@@ -163,7 +164,19 @@ Choose exports:
 ```bash
 coralnet-exporter download 3354 \
   --include images,labelset,metadata,annotations,classifier,covers,calcification \
+  --image-scope all \
   --output-dir output \
+  --resume
+```
+
+Download only confirmed images:
+
+```bash
+coralnet-exporter download 3354 \
+  --include images \
+  --image-scope confirmed \
+  --output-dir output \
+  --workers 20 \
   --resume
 ```
 
@@ -181,12 +194,17 @@ images,labelset,metadata,annotations,classifier,covers,calcification
 
 `covers` exports `percent_cover.csv`. `calcification` exports `calcification_rates.csv`; pass `--calcification-rate-table-id` to choose a specific CoralNet rate table, or omit it to use the first table shown in CoralNet's UI.
 
+`--image-scope all` downloads every source image into `images/`. `--image-scope confirmed` downloads only images matching CoralNet's `annotation_status=confirmed` browse filter into `images_confirmed/`.
+
+`--workers` controls the image downloader worker count. In the current implementation, workers are most useful when downloading multiple sources; a single source is still downloaded sequentially after its image list is discovered.
+
 ## Output Layout
 
 ```text
 output/
   <source name>/
     images/
+    images_confirmed/
     classifier_info.csv
     classifier_info.json
     labelset.csv

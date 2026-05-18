@@ -14,6 +14,7 @@ def render_slurm_script(
     conda_setup: str | None = None,
     conda_env: str | None = None,
     include: str = "labelset,metadata,annotations,classifier,covers,calcification",
+    image_scope: str = "all",
     extra_args: str = "--resume",
 ) -> str:
     work_dir = work_dir or Path.cwd()
@@ -50,6 +51,8 @@ def render_slurm_script(
         f"  {source} \\",
         f"  --output-dir {output_dir.resolve()} \\",
         f"  --include {include} \\",
+        f"  --image-scope {image_scope} \\",
+        f"  --workers {cpus} \\",
         f"  {extra_args}",
         "",
     ])
